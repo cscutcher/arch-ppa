@@ -89,7 +89,7 @@ package_build() {
 	rm -f *.pkg.tar.xz
 	mkdir -p $basedir/$repo_name
 	exe makechrootpkg -r $chroot -l $repo_name -- -i
-	exe mv *.pkg.tar.xz $basedir/$repo_name
+	exe mv -f *.pkg.tar.xz $basedir/$repo_name
     )
 }
 
@@ -102,7 +102,7 @@ sign_packages() {
 	set -e
 	cd $(dirname $1)
 	for pkg in "$@"; do
-	    gpg --detach-sign --use-agent $pkg
+	    gpg --batch --yes --detach-sign --use-agent $pkg
 	done
     )
 }
