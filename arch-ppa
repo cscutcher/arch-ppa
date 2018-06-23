@@ -29,6 +29,12 @@ create_chroot() {
     )
 }
 
+delete_chroot(){
+    if [[ -e $chroot ]]; then
+        rm_w_subvol $chroot
+    fi
+}
+
 install_system_deps() {
     (
 	set -e
@@ -83,7 +89,7 @@ package_build() {
 	rm -f *.pkg.tar.xz
 	mkdir -p $basedir/$repo_name
 	exe makechrootpkg -r $chroot -l $repo_name -- -i
-	exe mv *.pkg.tar.xz $basedir/$repo_name
+	exe mv -f *.pkg.tar.xz $basedir/$repo_name
     )
 }
 
@@ -96,7 +102,7 @@ sign_packages() {
 	set -e
 	cd $(dirname $1)
 	for pkg in "$@"; do
-	    gpg --detach-sign --use-agent $pkg
+	    gpg --batch --yes --detach-sign --use-agent $pkg
 	done
     )
 }
@@ -195,6 +201,92 @@ setup() {
     create_chroot
 }
 
+is_btrfs_subvolume() {
+    local OLD_OPTS=$(set +o)  # Preserve options
+    set -o nounset
+    echo "Check if \"$1\" is subvol..."
+    exe sudo btrfs subvolume show "$1" 2>&1 >/dev/null
+    local RESULT=$?
+
+    set +vx; eval "$OLD_OPTS"  # Restore options
+    return $RESULT
+}
+
+validate_path() {
+    # Check path is safe to delete
+    # Paranoid!
+    local OLD_OPTS=$(set +o)  # Preserve options
+    set -o nounset
+    set -o errexit
+
+    local REL_PATH="$(realpath --relative-to=$PWD $1)"
+
+    if [[ "$REL_PATH" =~ "^\.\..*" ]]; then
+        echo "Trying delete directory above PWD! Panicking!"
+        exit 666
+    fi
+
+    if [[ "$REL_PATH" =~ "^/.*" ]]; then
+        echo "Trying delete absolute! Panicking!"
+        exit 666
+    fi
+
+    if [[ "$(realpath $PWD)" == "/" ]]; then
+        echo "Trying delete while PWD is root! Panicking!"
+        exit 666
+    fi
+
+    set +vx; eval "$OLD_OPTS"  # Restore options
+    return 0
+}
+
+rm_w_subvol() {
+    # BTRFS aware recursive delete
+    local OLD_OPTS=$(set +o)  # Preserve options
+    set -o nounset
+
+    local DEL_PATH="$1"
+    local REAL_PATH="$(realpath $DEL_PATH)"
+    local RESULT=1
+
+    if [[ -d "$REAL_PATH" ]]; then
+        while true; do
+            if [[ ! -e "$REAL_PATH" ]]; then
+                echo "File already deleted!"
+                return 0
+            fi
+
+            if exe sudo rm -rf "$REAL_PATH" 2>&1 >/dev/null; then
+                echo "Successfully deleted!"
+                return 0
+            else
+                echo "Failed to delete. Check for subvols."
+
+                for f in $(sudo find "$REAL_PATH" -type d); do
+                    if [[ -e "$f" ]]; then
+                        if is_btrfs_subvolume "$f"; then
+                            echo "Attempt to delete subvolume \"$f\""
+                            if ! exe sudo btrfs subvolume delete "$f"; then
+                                echo "Unable to delete subvol \"$f\"!"
+                            fi
+                        fi
+                    else
+                        echo "$f missing already"
+                    fi
+                done
+            fi
+        done
+        exe  sudo rm -rf "$REAL_PATH"
+        local RESULT="$?"
+    else
+        exe rm -f "$REAL_PATH"
+        local RESULT="$?"
+    fi
+
+    set +vx; eval "$OLD_OPTS"  # Restore options
+    return $?
+}
+
 clean() {
     (
 	set -e
@@ -205,10 +297,11 @@ clean() {
 	for repo in "$@"; do
 	    # Clean repository and chroot
 	    if [ -d $basedir/chroot/$repo ]; then
-		exe sudo rm -rf $basedir/chroot/$repo $basedir/chroot/$repo.lock
+            rm_w_subvol $basedir/chroot/$repo
+            exe sudo rm -rf $basedir/chroot/$repo.lock
 	    fi
 	    if [ -d $basedir/$repo ]; then
-		exe rm -rf $basedir/$repo
+            rm_w_subvol $basedir/$repo
 	    fi
 	done
     )
